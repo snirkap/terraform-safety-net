@@ -89,7 +89,7 @@ resource "aws_security_group" "demo" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] # <- POLICY VIOLATION: Change this to fix
+    cidr_blocks = ["10.0.0.0/8"] # Fixed: Restricted to private network
   }
 
   # Egress rule - allow all outbound (common pattern)
