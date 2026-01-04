@@ -165,7 +165,16 @@ Create a policy named `terraform-safety-net-policy` with these permissions:
         "s3:PutBucketPublicAccessBlock",
         "s3:PutEncryptionConfiguration",
         "s3:GetBucketTagging",
-        "s3:PutBucketTagging"
+        "s3:PutBucketTagging",
+        "s3:GetBucketCORS",
+        "s3:GetBucketWebsite",
+        "s3:GetBucketLogging",
+        "s3:GetBucketObjectLockConfiguration",
+        "s3:GetAccelerateConfiguration",
+        "s3:GetBucketRequestPayment",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetReplicationConfiguration",
+        "s3:GetBucketLocation"
       ],
       "Resource": "arn:aws:s3:::terraform-safety-net-demo-*"
     },
@@ -191,6 +200,7 @@ Create a policy named `terraform-safety-net-policy` with these permissions:
       "Effect": "Allow",
       "Action": [
         "ec2:DescribeVpcs",
+        "ec2:DescribeVpcAttribute",
         "ec2:DescribeAccountAttributes"
       ],
       "Resource": "*"
