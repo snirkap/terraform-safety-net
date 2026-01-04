@@ -1,0 +1,48 @@
+# =============================================================================
+# Terraform Safety Net - Git Ignore
+# =============================================================================
+
+# Terraform
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+tfplan.json
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Cosign artifacts (generated during signing)
+*.bundle
+*.sig
+*.pem
+cosign.key
+cosign.pub
+
+# Environment files (never commit secrets)
+.env
+.env.*
+*.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local testing
+.test/
+.claude/

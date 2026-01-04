@@ -1,0 +1,243 @@
+# =============================================================================
+# Terraform Plan Workflow
+# =============================================================================
+# This workflow runs on pull requests and performs:
+#   1. Terraform init, fmt check, validate, and plan
+#   2. OPA/Conftest policy checks against the plan
+#   3. Cosign keyless signing of the plan artifact
+#   4. Upload signed artifacts for the apply workflow
+#
+# The workflow will FAIL if:
+#   - Terraform configuration is invalid
+#   - Policy checks fail (security violations)
+#
+# Artifacts produced:
+#   - tfplan: Binary Terraform plan file
+#   - tfplan.json: JSON representation of the plan
+#   - tfplan.bundle: Cosign signature bundle
+# =============================================================================
+
+name: Terraform Plan
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - 'terraform/**'
+      - 'policies/**'
+      - 'scripts/**'
+      - '.github/workflows/plan.yml'
+
+  # Allow manual trigger for testing
+  workflow_dispatch:
+
+# Required for OIDC authentication with AWS and Sigstore
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  TERRAFORM_VERSION: "1.5.7"
+  CONFTEST_VERSION: "0.46.0"
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  plan:
+    name: Plan & Policy Check
+    runs-on: ubuntu-latest
+
+    # Use default shell with pipefail
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Checkout & Setup
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      # -----------------------------------------------------------------------
+      # AWS Authentication (OIDC)
+      # -----------------------------------------------------------------------
+      # TODO: Configure AWS OIDC authentication
+      # 1. Create an IAM OIDC identity provider for GitHub Actions
+      # 2. Create an IAM role with appropriate permissions
+      # 3. Set the following secrets/variables in your repository:
+      #    - AWS_ROLE_ARN: The ARN of the IAM role to assume
+      #    - AWS_REGION: The AWS region (or set as env var below)
+      #
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          role-session-name: terraform-plan-${{ github.run_id }}
+
+      # -----------------------------------------------------------------------
+      # Terraform Plan
+      # -----------------------------------------------------------------------
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          echo "::group::Terraform Init"
+          terraform init -input=false
+          echo "::endgroup::"
+
+      - name: Terraform Format Check
+        working-directory: terraform
+        run: |
+          echo "::group::Terraform Format Check"
+          terraform fmt -check -recursive -diff
+          echo "::endgroup::"
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: |
+          echo "::group::Terraform Validate"
+          terraform validate
+          echo "::endgroup::"
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: |
+          echo "::group::Terraform Plan"
+          terraform plan -input=false -out=tfplan
+          echo "::endgroup::"
+
+          # Convert to JSON for policy checks
+          terraform show -json tfplan > tfplan.json
+
+          # Show plan summary
+          echo "::group::Plan Summary"
+          terraform show -no-color tfplan | head -100
+          echo "::endgroup::"
+
+      # -----------------------------------------------------------------------
+      # Policy Checks
+      # -----------------------------------------------------------------------
+      - name: Install Conftest
+        run: |
+          echo "::group::Install Conftest"
+          wget -q "https://github.com/open-policy-agent/conftest/releases/download/v${{ env.CONFTEST_VERSION }}/conftest_${{ env.CONFTEST_VERSION }}_Linux_x86_64.tar.gz"
+          tar xzf "conftest_${{ env.CONFTEST_VERSION }}_Linux_x86_64.tar.gz"
+          sudo mv conftest /usr/local/bin/
+          conftest --version
+          echo "::endgroup::"
+
+      - name: Run Policy Checks
+        working-directory: terraform
+        run: |
+          echo "::group::Policy Check Results"
+          echo "=========================================="
+          echo "  OPA/CONFTEST POLICY CHECKS"
+          echo "=========================================="
+          echo ""
+
+          # Run conftest with detailed output
+          conftest test tfplan.json \
+            --policy ../policies/terraform \
+            --output stdout
+
+          echo ""
+          echo "=========================================="
+          echo "  ALL POLICIES PASSED"
+          echo "=========================================="
+          echo "::endgroup::"
+
+      # -----------------------------------------------------------------------
+      # Sign Plan Artifact
+      # -----------------------------------------------------------------------
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.2.2'
+
+      - name: Sign Plan File
+        working-directory: terraform
+        run: |
+          echo "::group::Sign Plan File"
+          echo "Signing plan file with cosign (keyless)..."
+
+          # Sign the plan file and create a bundle
+          cosign sign-blob \
+            --yes \
+            --bundle tfplan.bundle \
+            tfplan
+
+          echo ""
+          echo "Plan file signed successfully!"
+          echo "Bundle created: tfplan.bundle"
+
+          # Calculate and display hash
+          PLAN_HASH=$(sha256sum tfplan | cut -d' ' -f1)
+          echo "Plan file SHA256: ${PLAN_HASH}"
+          echo "::endgroup::"
+
+      # -----------------------------------------------------------------------
+      # Upload Artifacts
+      # -----------------------------------------------------------------------
+      - name: Upload Plan Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: |
+            terraform/tfplan
+            terraform/tfplan.json
+            terraform/tfplan.bundle
+          retention-days: 7
+          if-no-files-found: error
+
+      # -----------------------------------------------------------------------
+      # PR Comment (optional)
+      # -----------------------------------------------------------------------
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            // Read plan output
+            const { execSync } = require('child_process');
+            const planOutput = execSync('cd terraform && terraform show -no-color tfplan 2>&1 | head -50', { encoding: 'utf8' });
+
+            const body = `## Terraform Plan Results
+
+            ### Policy Checks
+            All policy checks passed.
+
+            ### Plan Summary
+            \`\`\`
+            ${planOutput}
+            \`\`\`
+
+            ### Artifacts
+            - **tfplan**: Signed Terraform plan file
+            - **tfplan.json**: JSON representation for policy checks
+            - **tfplan.bundle**: Cosign signature bundle
+
+            ### Next Steps
+            1. Review the plan changes above
+            2. Merge the PR when ready
+            3. Trigger the **Apply** workflow manually to deploy
+
+            > Signed with Sigstore cosign (keyless)
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

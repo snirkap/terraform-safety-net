@@ -1,0 +1,263 @@
+# =============================================================================
+# Terraform Apply Workflow
+# =============================================================================
+# This workflow is triggered manually (workflow_dispatch) and performs:
+#   1. Download plan artifacts from the plan workflow
+#   2. Verify the cosign signature of the plan file
+#   3. Apply the verified Terraform plan
+#
+# The workflow will FAIL if:
+#   - Plan artifacts are not found
+#   - Signature verification fails (plan was tampered)
+#
+# Security:
+#   - Only signed plan files can be applied
+#   - Signature verification ensures integrity
+#   - OIDC authentication (no long-lived credentials)
+# =============================================================================
+
+name: Terraform Apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run ID of the plan workflow (leave empty to use latest)'
+        required: false
+        type: string
+      confirm:
+        description: 'Type "apply" to confirm deployment'
+        required: true
+        type: string
+
+# Required for OIDC authentication with AWS
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+
+env:
+  TERRAFORM_VERSION: "1.5.7"
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  apply:
+    name: Apply Terraform Plan
+    runs-on: ubuntu-latest
+
+    # Safety check: require explicit confirmation
+    if: github.event.inputs.confirm == 'apply'
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Validate Input
+      # -----------------------------------------------------------------------
+      - name: Validate Confirmation
+        run: |
+          if [[ "${{ github.event.inputs.confirm }}" != "apply" ]]; then
+            echo "ERROR: Deployment not confirmed. You must type 'apply' to proceed."
+            exit 1
+          fi
+          echo "Deployment confirmed. Proceeding..."
+
+      # -----------------------------------------------------------------------
+      # Checkout & Setup
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      # -----------------------------------------------------------------------
+      # Download Plan Artifacts
+      # -----------------------------------------------------------------------
+      - name: Download Plan Artifacts (specific run)
+        if: github.event.inputs.run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: terraform
+          run-id: ${{ github.event.inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Plan Artifacts (latest)
+        if: github.event.inputs.run_id == ''
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: plan.yml
+          name: terraform-plan
+          path: terraform
+          search_artifacts: true
+          if_no_artifact_found: fail
+
+      - name: Verify Artifacts Downloaded
+        working-directory: terraform
+        run: |
+          echo "::group::Downloaded Artifacts"
+          ls -la
+
+          if [[ ! -f "tfplan" ]]; then
+            echo "ERROR: tfplan not found!"
+            exit 1
+          fi
+
+          if [[ ! -f "tfplan.bundle" ]]; then
+            echo "ERROR: tfplan.bundle not found!"
+            exit 1
+          fi
+
+          echo ""
+          echo "Plan file SHA256: $(sha256sum tfplan | cut -d' ' -f1)"
+          echo "::endgroup::"
+
+      # -----------------------------------------------------------------------
+      # Verify Signature
+      # -----------------------------------------------------------------------
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.2.2'
+
+      - name: Verify Plan Signature
+        working-directory: terraform
+        env:
+          # TODO: Set these to restrict who can sign plans
+          # CERTIFICATE_IDENTITY: "https://github.com/YOUR_ORG/YOUR_REPO/.github/workflows/plan.yml@refs/heads/main"
+          # CERTIFICATE_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
+          CERTIFICATE_IDENTITY: ""
+          CERTIFICATE_OIDC_ISSUER: ""
+        run: |
+          echo "::group::Signature Verification"
+          echo "=========================================="
+          echo "  VERIFYING PLAN SIGNATURE"
+          echo "=========================================="
+          echo ""
+
+          # Build verification command
+          VERIFY_CMD="cosign verify-blob --bundle tfplan.bundle"
+
+          # Add identity verification if specified
+          if [[ -n "${CERTIFICATE_IDENTITY}" ]]; then
+            echo "Verifying signer identity: ${CERTIFICATE_IDENTITY}"
+            VERIFY_CMD="${VERIFY_CMD} --certificate-identity ${CERTIFICATE_IDENTITY}"
+          fi
+
+          if [[ -n "${CERTIFICATE_OIDC_ISSUER}" ]]; then
+            echo "Verifying OIDC issuer: ${CERTIFICATE_OIDC_ISSUER}"
+            VERIFY_CMD="${VERIFY_CMD} --certificate-oidc-issuer ${CERTIFICATE_OIDC_ISSUER}"
+          fi
+
+          # If no identity specified, use permissive verification
+          # TODO: For production, always specify the expected identity!
+          if [[ -z "${CERTIFICATE_IDENTITY}" ]] && [[ -z "${CERTIFICATE_OIDC_ISSUER}" ]]; then
+            echo "WARNING: No identity verification specified."
+            echo "For production, set CERTIFICATE_IDENTITY and CERTIFICATE_OIDC_ISSUER."
+            VERIFY_CMD="${VERIFY_CMD} --certificate-identity-regexp '.*' --certificate-oidc-issuer-regexp '.*'"
+          fi
+
+          VERIFY_CMD="${VERIFY_CMD} tfplan"
+
+          echo ""
+          echo "Running: ${VERIFY_CMD}"
+          echo ""
+
+          # Run verification
+          eval ${VERIFY_CMD}
+
+          echo ""
+          echo "=========================================="
+          echo "  SIGNATURE VERIFICATION PASSED"
+          echo "=========================================="
+          echo "::endgroup::"
+
+      # -----------------------------------------------------------------------
+      # AWS Authentication (OIDC)
+      # -----------------------------------------------------------------------
+      # TODO: Configure AWS OIDC authentication
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          role-session-name: terraform-apply-${{ github.run_id }}
+
+      # -----------------------------------------------------------------------
+      # Terraform Apply
+      # -----------------------------------------------------------------------
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          echo "::group::Terraform Init"
+          terraform init -input=false
+          echo "::endgroup::"
+
+      - name: Show Plan Summary
+        working-directory: terraform
+        run: |
+          echo "::group::Plan Summary"
+          echo "=========================================="
+          echo "  PLAN TO BE APPLIED"
+          echo "=========================================="
+          echo ""
+          terraform show -no-color tfplan | head -100
+          echo ""
+          echo "... (truncated)"
+          echo "::endgroup::"
+
+      - name: Terraform Apply
+        working-directory: terraform
+        run: |
+          echo "::group::Terraform Apply"
+          echo "=========================================="
+          echo "  APPLYING TERRAFORM PLAN"
+          echo "=========================================="
+          echo ""
+
+          terraform apply -auto-approve tfplan
+
+          echo ""
+          echo "=========================================="
+          echo "  APPLY COMPLETED SUCCESSFULLY"
+          echo "=========================================="
+          echo "::endgroup::"
+
+      - name: Show Outputs
+        working-directory: terraform
+        run: |
+          echo "::group::Terraform Outputs"
+          terraform output || echo "No outputs defined"
+          echo "::endgroup::"
+
+  # ---------------------------------------------------------------------------
+  # Safety Check Job
+  # ---------------------------------------------------------------------------
+  not-confirmed:
+    name: Deployment Not Confirmed
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm != 'apply'
+
+    steps:
+      - name: Show Warning
+        run: |
+          echo "=========================================="
+          echo "  DEPLOYMENT NOT CONFIRMED"
+          echo "=========================================="
+          echo ""
+          echo "You must type 'apply' in the confirmation field to proceed."
+          echo "This is a safety measure to prevent accidental deployments."
+          echo ""
+          echo "To deploy:"
+          echo "  1. Go to Actions > Terraform Apply"
+          echo "  2. Click 'Run workflow'"
+          echo "  3. Type 'apply' in the confirmation field"
+          echo "  4. Click 'Run workflow'"
+          echo ""
+          exit 1
