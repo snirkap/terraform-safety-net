@@ -6,7 +6,7 @@
 # all four public access block settings are enabled.
 # =============================================================================
 
-package terraform
+package main
 
 # Deny if any S3 public access block has block_public_acls set to false
 deny[msg] {

@@ -6,7 +6,7 @@
 #   - Resource: "*" (applies to all resources)
 # =============================================================================
 
-package terraform
+package main
 
 # Deny IAM policies with Action = "*"
 deny[msg] {

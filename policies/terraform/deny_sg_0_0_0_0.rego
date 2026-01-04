@@ -7,7 +7,7 @@
 #   - Port 3389 (RDP)
 # =============================================================================
 
-package terraform
+package main
 
 # List of sensitive ports that should not be open to the world
 sensitive_ports := [22, 3389]
