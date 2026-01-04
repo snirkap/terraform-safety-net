@@ -395,18 +395,16 @@ This ensures only plans signed by your specific workflow can be applied.
 ### Adding New Policies
 
 1. Create a new `.rego` file in `policies/terraform/`
-2. Use the `package terraform` package name
-3. Define `deny` rules that return error messages
+2. Use `package main` (required by conftest)
+3. Define `deny[msg]` rules that return error messages
 4. The policy will automatically be included in checks
 
 Example policy:
 ```rego
-package terraform
+package main
 
-import rego.v1
-
-deny contains msg if {
-    some resource in input.resource_changes
+deny[msg] {
+    resource := input.resource_changes[_]
     resource.type == "aws_instance"
     resource.change.after.instance_type == "t2.micro"
     msg := sprintf(
@@ -416,12 +414,23 @@ deny contains msg if {
 }
 ```
 
-### Configuring Remote Backend
+### Remote State (Optional)
 
-1. Create an S3 bucket for state storage
-2. Create a DynamoDB table for state locking
+This demo uses **local state** intentionally to keep things simple. For a demo or learning purposes, local state is sufficient.
+
+**For production**, you should use remote state with S3 + DynamoDB:
+
+1. Create an S3 bucket for state storage (enable versioning)
+2. Create a DynamoDB table for state locking (partition key: `LockID`)
 3. Copy `terraform/backend.tf.example` to `terraform/backend.tf`
 4. Update the values with your bucket and table names
+5. Add S3/DynamoDB permissions to your IAM policy
+
+**Why it's not included by default:**
+- Adds setup complexity (users must create bucket + table first)
+- Requires additional IAM permissions
+- Not the focus of this demo (plan signing + policies)
+- Local state works fine for demonstrating the workflow
 
 ## Troubleshooting
 
